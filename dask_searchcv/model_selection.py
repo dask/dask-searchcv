@@ -39,7 +39,7 @@ from .methods import (fit, fit_transform, fit_and_score, pipeline, fit_best,
                       decompress_params, score, feature_union,
                       feature_union_concat, MISSING)
 from .utils import to_indexable, to_keys, unzip, is_dask_collection
-
+from sklearn.utils.validation import _is_arraylike
 try:
     from cytoolz import get, pluck
 except ImportError:  # pragma: no cover
@@ -109,6 +109,16 @@ def build_graph(estimator, cv, scorer, candidate_params, X, y=None,
                        n_splits, error_score, weights)
     keys = [cv_results]
 
+    if not _is_arraylike(refit) and refit:
+        refit = True
+    elif _is_arraylike(refit):
+        if isinstance(refit, (tuple, list)) and len(refit) == 2:
+            X_name, y_name = refit
+        else:
+            X_name = refit
+        refit = True
+    else:
+        refit = False
     if refit:
         best_params = 'best-params-' + main_token
         dsk[best_params] = (get_best_params, candidate_params_name, cv_results)
@@ -694,7 +704,7 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
         return self.cv_results_['mean_test_score'][self.best_index_]
 
     def _check_is_fitted(self, method_name):
-        if not self.refit:
+        if not _is_arraylike(self.refit) and not self.refit:
             msg = ('This {0} instance was initialized with refit=False. {1} '
                    'is available only after refitting on the best '
                    'parameters.').format(type(self).__name__, method_name)
@@ -795,7 +805,7 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.cv_results_ = results = out[0]
         self.best_index_ = np.flatnonzero(results["rank_test_score"] == 1)[0]
 
-        if self.refit:
+        if _is_arraylike(self.refit) or self.refit:
             self.best_estimator_ = out[1]
         return self
 
@@ -866,10 +876,12 @@ cv : int, cross-validation generator or an iterable, optional
     either binary or multiclass, ``StratifiedKFold`` is used. In all
     other cases, ``KFold`` is used.
 
-refit : boolean, default=True
+refit : boolean, array-like or (X, y) tuple, default=True,
     Refit the best estimator with the entire dataset.
     If "False", it is impossible to make predictions using
-    this {name} instance after fitting.
+    this {name} instance after fitting.  If passing
+    cache_cv as a CVCache-like instance, then refit
+    must be "False" or a feature matrix X or an X, y tuple.
 
 error_score : 'raise' (default) or numeric
     Value to assign to the score if an error occurs in estimator fitting.
@@ -893,15 +905,19 @@ n_jobs : int, default=-1
     distributed schedulers. If ``n_jobs == -1`` [default] all cpus are used.
     For ``n_jobs < -1``, ``(n_cpus + 1 + n_jobs)`` are used.
 
-cache_cv : bool, default=True
-    Whether to extract each train/test subset at most once in each worker
-    process, or every time that subset is needed. Caching the splits can
-    speedup computation at the cost of increased memory usage per worker
-    process.
+cache_cv : bool or object with ``extract`` method, default=True
+    If boolean, ``cache_cv`` indicates whether to extract each train/test
+    subset at most once in each worker process, or every time that subset
+    is needed. Caching the splits can speedup computation at the cost of
+    increased memory usage per worker process.
 
     If True, worst case memory usage is ``(n_splits + 1) * (X.nbytes +
     y.nbytes)`` per worker. If False, worst case memory usage is
     ``(n_threads_per_worker + 1) * (X.nbytes + y.nbytes)`` per worker.
+
+    If ``cache_cv`` is not True/False it should be an instance with an
+     ``extract(self, X, y, n, is_x=True, is_train=True)`` (
+    similar to ``dask_searchcv.methods.CVCache``)
 
 Examples
 --------

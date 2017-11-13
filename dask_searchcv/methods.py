@@ -125,7 +125,6 @@ class CVCache(object):
 
 
 def cv_split(cv, X, y, groups, is_pairwise, cache):
-
     if not cache or isinstance(cache, bool):
         check_consistent_length(X, y, groups)
         splits = list(cv.split(X, y, groups))
@@ -134,7 +133,11 @@ def cv_split(cv, X, y, groups, is_pairwise, cache):
     params = dict(pairwise=is_pairwise,
                   cache={},
                   splits=splits)
-    cache.set_params(**params)
+    if hasattr(cache, 'set_params'):
+        cache.set_params(**params)
+    else:
+        for k, v in params.items():
+            setattr(cache, k, v)
     return cache
 
 

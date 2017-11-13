@@ -620,3 +620,63 @@ def test_scheduler_param_distributed(loop):
 def test_scheduler_param_bad():
     with pytest.raises(ValueError):
         _normalize_scheduler('threeding', 4)
+
+
+class CacheCVLike(CVCache):
+    called = 0
+    def __init__(self, splits=None, pairwise=False, cache=True):
+        CVCache.__init__(self, splits=splits, pairwise=pairwise, cache=cache)
+
+    def extract(self, X, y, n, is_x=True, is_train=True):
+        CacheCVLike.called += 1
+        X, y = self.make_data()
+        if is_x:
+            return X
+        else:
+            return y
+
+    def make_data(self):
+        return make_classification(n_samples=100,
+                                   n_features=10,
+                                   random_state=0)
+
+
+class CacheCVBad(CacheCVLike):
+
+    extract = CVCache.extract
+
+
+@pytest.mark.parametrize('cls, refit, should_pass', [
+    (cls, refit, sp1 and sp2)
+    for cls, sp1 in zip((CacheCVLike, CacheCVBad), (True, False))
+    for refit, sp2 in zip((True, False, 'sample'), (False, False, True))
+])
+def test_cv_cache_instance_to_search(cls, refit, should_pass):
+    CacheCVLike.called = 0
+    pg = {'foo_param': list(range(2, 100))}
+    n_splits = 3
+    cv = KFold(n_splits)
+    cache_cv = cls()
+    if refit == 'sample':
+        refit = cache_cv.make_data()
+    def fit_pred():
+        gs = dcv.GridSearchCV(MockClassifier(),
+                              pg,
+                              cv=cv,
+                              refit=refit,
+                              cache_cv=cache_cv)
+
+        gs.fit(np.arange(10))
+        pred = gs.predict(cache_cv.make_data()[0])
+        return pred, gs.cv_results_
+
+    if should_pass:
+        pred, cv_results_ = fit_pred()
+        assert pred == 100
+        calls_expected = n_splits * len(pg['foo_param']) * 2 * 2
+        assert CacheCVLike.called == calls_expected
+        assert pd.DataFrame(cv_results_).shape[0] == len(pg['foo_param'])
+    else:
+        with pytest.raises(Exception):
+            fit_pred()
+
