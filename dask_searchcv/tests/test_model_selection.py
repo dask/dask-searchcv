@@ -45,7 +45,7 @@ from dask_searchcv.model_selection import (compute_n_splits, check_cv,
 from dask_searchcv.methods import CVCache
 from dask_searchcv.utils_test import (FailingClassifier, MockClassifier,
                                       ScalingTransformer, CheckXClassifier,
-                                      ignore_warnings)
+                                      ignore_warnings, MockUnsupervised)
 
 try:
     from distributed import Client
@@ -637,7 +637,7 @@ class CacheCVLike(CVCache):
 
     def make_data(self):
         return make_classification(n_samples=100,
-                                   n_features=10,
+                                   n_features=5,
                                    random_state=0)
 
 
@@ -646,28 +646,70 @@ class CacheCVBad(CacheCVLike):
     extract = CVCache.extract
 
 
-@pytest.mark.parametrize('cls, refit, should_pass', [
-    (cls, refit, sp1 and sp2)
-    for cls, sp1 in zip((CacheCVLike, CacheCVBad), (True, False))
-    for refit, sp2 in zip((True, False, 'sample'), (False, False, True))
-])
-def test_cv_cache_instance_to_search(cls, refit, should_pass):
+example_arguments = ['argument_{}'.format(_) for _ in range(15)]
+
+def cv_split_X_y_ok(cv, X, y, groups, is_pairwise, cache):
+    for xi in X:
+        # normally one would use elements of X to inform how
+        # a sample should be drawn, e.g. filenames (see example_arguments above)
+        assert hasattr(xi, 'startswith') and xi.startswith('argument_')
     CacheCVLike.called = 0
-    pg = {'foo_param': list(range(2, 100))}
+    return CacheCVLike(list(cv.split(X, y, groups)), is_pairwise, cache)
+
+def cv_split_X_ok(cv, X, y, groups, is_pairwise, cache):
+    return cv_split_X_y_ok(cv, X, y, groups, is_pairwise, cache)
+
+
+def cv_split_bad(cv, X, y, groups, is_pairwise, cache):
+    return CacheCVBad(list(cv.split(X, y, groups)), is_pairwise, cache)
+
+
+@pytest.mark.parametrize('cv_split, refit, should_pass', [
+    (cv_split_X_y_ok, True, False),
+    (cv_split_X_y_ok, False, False),
+    (cv_split_X_y_ok, 'sample_xy', True),
+    (cv_split_X_ok, True, False),
+    (cv_split_X_ok, False, False),
+    (cv_split_X_ok, 'sample_x', True),
+    (cv_split_bad, True, False),      # fails as fit gets ['argument_0', ....]
+                                      # as X rather than a feature matrix
+    (cv_split_bad, False, False),
+    (cv_split_bad, 'sample_xy', False),
+])
+def test_cv_cache_instance_to_search(cv_split, refit, should_pass):
+    called = 0
     n_splits = 3
     cv = KFold(n_splits)
-    cache_cv = cls()
-    if refit == 'sample':
-        refit = cache_cv.make_data()
-    def fit_pred():
-        gs = dcv.GridSearchCV(MockClassifier(),
-                              pg,
-                              cv=cv,
-                              refit=refit,
-                              cache_cv=cache_cv)
+    pg = {'foo_param': list(range(2, 100))}
+    if not isinstance(refit, bool):
+        Xy = make_classification(n_samples=100,
+                                 n_features=5,
+                                 random_state=0)
+        if refit == 'sample_x':
+            estimator = MockUnsupervised()
+            refit = Xy[0]
+        else:
+            estimator = MockClassifier()
+            refit = Xy
 
-        gs.fit(np.arange(10))
-        pred = gs.predict(cache_cv.make_data()[0])
+
+    class GridSearchCVSampler(dcv.GridSearchCV):
+
+        @classmethod
+        def _cv_split(self, *a, **kw):
+            return cv_split(*a, **kw)
+
+    def fit_pred():
+        gs = GridSearchCVSampler(estimator,
+                             pg,
+                             cv=cv,
+                             refit=refit)
+
+        gs.fit(example_arguments)
+        X, _ = make_classification(n_samples=100,
+                                   n_features=10,
+                                   random_state=0)
+        pred = gs.predict(X)
         return pred, gs.cv_results_
 
     if should_pass:
@@ -679,4 +721,3 @@ def test_cv_cache_instance_to_search(cls, refit, should_pass):
     else:
         with pytest.raises(Exception):
             fit_pred()
-

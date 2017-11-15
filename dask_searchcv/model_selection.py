@@ -34,7 +34,7 @@ from sklearn.utils.validation import _num_samples, check_is_fitted
 
 from ._normalize import normalize_estimator
 from .methods import (fit, fit_transform, fit_and_score, pipeline, fit_best,
-                      get_best_params, create_cv_results, cv_split,
+                      get_best_params, create_cv_results, cv_split as _cv_split,
                       cv_n_samples, cv_extract, cv_extract_params,
                       decompress_params, score, feature_union,
                       feature_union_concat, MISSING)
@@ -63,7 +63,9 @@ class TokenIterator(object):
 
 def build_graph(estimator, cv, scorer, candidate_params, X, y=None,
                 groups=None, fit_params=None, iid=True, refit=True,
-                error_score='raise', return_train_score=True, cache_cv=True):
+                error_score='raise', return_train_score=True, cache_cv=True,
+                cv_split=None):
+
 
     X, y, groups = to_indexable(X, y, groups)
     cv = check_cv(cv, y, is_classifier(estimator))
@@ -73,6 +75,12 @@ def build_graph(estimator, cv, scorer, candidate_params, X, y=None,
     dsk = {}
     X_name, y_name, groups_name = to_keys(dsk, X, y, groups)
     n_splits = compute_n_splits(cv, X, y, groups)
+    if cv_split:
+        if not _is_arraylike(refit) and refit:
+            raise ValueError('Expected refit=X or refit=(X, y) with cv_split')
+    else:
+        cv_split = _cv_split
+        refit = bool(refit)
 
     if fit_params:
         # A mapping of {name: (name, graph-key)}
@@ -86,7 +94,6 @@ def build_graph(estimator, cv, scorer, candidate_params, X, y=None,
     main_token = tokenize(normalize_estimator(estimator), fields, params,
                           X_name, y_name, groups_name, fit_params, cv,
                           error_score == 'raise', return_train_score)
-
     cv_name = 'cv-split-' + main_token
     dsk[cv_name] = (cv_split, cv, X_name, y_name, groups_name,
                     is_pairwise, cache_cv)
@@ -108,18 +115,13 @@ def build_graph(estimator, cv, scorer, candidate_params, X, y=None,
     dsk[cv_results] = (create_cv_results, scores, candidate_params_name,
                        n_splits, error_score, weights)
     keys = [cv_results]
-
-    if not _is_arraylike(refit) and refit:
-        refit = True
-    elif _is_arraylike(refit):
+    if _is_arraylike(refit):
         if isinstance(refit, (tuple, list)) and len(refit) == 2:
             X_name, y_name = refit
         else:
             X_name = refit
-        refit = True
-    else:
-        refit = False
-    if refit:
+
+    if refit is True or _is_arraylike(refit):
         best_params = 'best-params-' + main_token
         dsk[best_params] = (get_best_params, candidate_params_name, cv_results)
         best_estimator = 'best-estimator-' + main_token
@@ -786,6 +788,7 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
             raise ValueError("error_score must be the string 'raise' or a"
                              " numeric value.")
 
+        cv_split = getattr(self, '_cv_split', None)
         dsk, keys, n_splits = build_graph(estimator, self.cv, self.scorer_,
                                           list(self._get_param_iterator()),
                                           X, y, groups, fit_params,
@@ -793,7 +796,8 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
                                           refit=self.refit,
                                           error_score=error_score,
                                           return_train_score=self.return_train_score,
-                                          cache_cv=self.cache_cv)
+                                          cache_cv=self.cache_cv,
+                                          cv_split=cv_split)
         self.dask_graph_ = dsk
         self.n_splits_ = n_splits
 
@@ -805,9 +809,10 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.cv_results_ = results = out[0]
         self.best_index_ = np.flatnonzero(results["rank_test_score"] == 1)[0]
 
-        if _is_arraylike(self.refit) or self.refit:
+        if (hasattr(self, '_cv_split') and _is_arraylike(self.refit)) or self.refit:
             self.best_estimator_ = out[1]
         return self
+
 
     def visualize(self, filename='mydask', format=None, **kwargs):
         """Render the task graph for this parameter search using ``graphviz``.
@@ -876,12 +881,10 @@ cv : int, cross-validation generator or an iterable, optional
     either binary or multiclass, ``StratifiedKFold`` is used. In all
     other cases, ``KFold`` is used.
 
-refit : boolean, array-like or (X, y) tuple, default=True,
+refit : boolean, default=True
     Refit the best estimator with the entire dataset.
     If "False", it is impossible to make predictions using
-    this {name} instance after fitting.  If passing
-    cache_cv as a CVCache-like instance, then refit
-    must be "False" or a feature matrix X or an X, y tuple.
+    this {name} instance after fitting.
 
 error_score : 'raise' (default) or numeric
     Value to assign to the score if an error occurs in estimator fitting.
@@ -905,19 +908,14 @@ n_jobs : int, default=-1
     distributed schedulers. If ``n_jobs == -1`` [default] all cpus are used.
     For ``n_jobs < -1``, ``(n_cpus + 1 + n_jobs)`` are used.
 
-cache_cv : bool or object with ``extract`` method, default=True
-    If boolean, ``cache_cv`` indicates whether to extract each train/test
-    subset at most once in each worker process, or every time that subset
-    is needed. Caching the splits can speedup computation at the cost of
-    increased memory usage per worker process.
-
+cache_cv : bool, default=True
+    Whether to extract each train/test subset at most once in each worker
+    process, or every time that subset is needed. Caching the splits can
+    speedup computation at the cost of increased memory usage per worker
+    process.
     If True, worst case memory usage is ``(n_splits + 1) * (X.nbytes +
     y.nbytes)`` per worker. If False, worst case memory usage is
     ``(n_threads_per_worker + 1) * (X.nbytes + y.nbytes)`` per worker.
-
-    If ``cache_cv`` is not True/False it should be an instance with an
-     ``extract(self, X, y, n, is_x=True, is_train=True)`` (
-    similar to ``dask_searchcv.methods.CVCache``)
 
 Examples
 --------
