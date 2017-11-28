@@ -21,7 +21,9 @@ from dask.utils import tmpdir
 from sklearn.datasets import make_classification, load_iris
 from sklearn.decomposition import PCA
 from sklearn.exceptions import NotFittedError, FitFailedWarning
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectKBest
+from sklearn.metrics.scorer import _passthrough_scorer
 from sklearn.model_selection import (KFold,
                                      GroupKFold,
                                      StratifiedKFold,
@@ -41,7 +43,8 @@ from sklearn.svm import SVC
 
 import dask_searchcv as dcv
 from dask_searchcv.model_selection import (compute_n_splits, check_cv,
-        _normalize_n_jobs, _normalize_scheduler)
+                                           _normalize_n_jobs, _normalize_scheduler)
+from dask_searchcv._compat import _HAS_MULTIPLE_METRICS
 from dask_searchcv.methods import CVCache
 from dask_searchcv.utils_test import (FailingClassifier, MockClassifier,
                                       ScalingTransformer, CheckXClassifier,
@@ -369,9 +372,10 @@ def test_pipeline_sub_estimators():
                            SVC(kernel='linear', random_state=0, C=1),
                            SVC(kernel='linear', random_state=0, C=10)]}]
 
-    gs = GridSearchCV(pipe, param_grid=param_grid)
+    gs = GridSearchCV(pipe, param_grid=param_grid, return_train_score=True)
     gs.fit(X, y)
-    dgs = dcv.GridSearchCV(pipe, param_grid=param_grid, scheduler='sync')
+    dgs = dcv.GridSearchCV(pipe, param_grid=param_grid, scheduler='sync',
+                           return_train_score=True)
     dgs.fit(X, y)
 
     # Check best params match
@@ -391,18 +395,20 @@ def test_pipeline_sub_estimators():
                                dgs.best_estimator_.named_steps['svc'].coef_)
 
 
-def check_scores_all_nan(gs, bad_param):
+def check_scores_all_nan(gs, bad_param, score_key='score'):
     bad_param = 'param_' + bad_param
     n_candidates = len(gs.cv_results_['params'])
-    assert all(np.isnan([gs.cv_results_['split%d_test_score' % s][cand_i]
-                        for s in range(gs.n_splits_)]).all()
+    keys = ['split{}_test_{}'.format(s, score_key)
+            for s in range(gs.n_splits_)]
+    assert all(np.isnan([gs.cv_results_[key][cand_i]
+                         for key in keys]).all()
                for cand_i in range(n_candidates)
                if gs.cv_results_[bad_param][cand_i] ==
                FailingClassifier.FAILING_PARAMETER)
 
 
 @pytest.mark.parametrize('weights',
-        [None, (None, {'tr0': 2, 'tr2': 3}, {'tr0': 2, 'tr2': 4})])
+                         [None, (None, {'tr0': 2, 'tr2': 3}, {'tr0': 2, 'tr2': 4})])
 def test_feature_union(weights):
     X = np.ones((10, 5))
     y = np.zeros(10)
@@ -454,7 +460,32 @@ def test_feature_union_fit_failure():
                      ('clf', MockClassifier())])
 
     grid = {'union__bad__parameter': [0, 1, 2]}
-    gs = dcv.GridSearchCV(pipe, grid, refit=False)
+    gs = dcv.GridSearchCV(pipe, grid, refit=False, scoring=None)
+
+    # Check that failure raises if error_score is `'raise'`
+    with pytest.raises(ValueError):
+        gs.fit(X, y)
+
+    # Check that grid scores were set to error_score on failure
+    gs.error_score = float('nan')
+    with pytest.warns(FitFailedWarning):
+        gs.fit(X, y)
+    check_scores_all_nan(gs, 'union__bad__parameter')
+
+
+@ignore_warnings
+@pytest.mark.skipif(not _HAS_MULTIPLE_METRICS, reason="Added in 0.19.0")
+def test_feature_union_fit_failure_multiple_metrics():
+    scoring = {"score_1": _passthrough_scorer, "score_2": _passthrough_scorer}
+    X, y = make_classification(n_samples=100, n_features=10, random_state=0)
+
+    pipe = Pipeline([('union', FeatureUnion([('good', MockClassifier()),
+                                             ('bad', FailingClassifier())],
+                                            transformer_weights={'bad': 0.5})),
+                     ('clf', MockClassifier())])
+
+    grid = {'union__bad__parameter': [0, 1, 2]}
+    gs = dcv.GridSearchCV(pipe, grid, refit=False, scoring=scoring)
 
     # Check that failure raises if error_score is `'raise'`
     with pytest.raises(ValueError):
@@ -465,7 +496,8 @@ def test_feature_union_fit_failure():
     with pytest.warns(FitFailedWarning):
         gs.fit(X, y)
 
-    check_scores_all_nan(gs, 'union__bad__parameter')
+    for key in scoring:
+        check_scores_all_nan(gs, 'union__bad__parameter', score_key=key)
 
 
 @ignore_warnings
@@ -721,3 +753,47 @@ def test_cv_cache_instance_to_search(cv_split, refit, should_pass):
     else:
         with pytest.raises(Exception):
             fit_pred()
+
+
+@pytest.mark.skipif(not _HAS_MULTIPLE_METRICS, reason="Added in 0.19.0")
+def test_cv_multiplemetrics():
+    X, y = make_classification(random_state=0)
+
+    param_grid = {'max_depth': [1, 5]}
+    a = dcv.GridSearchCV(RandomForestClassifier(), param_grid, refit='score1',
+                         scoring={'score1': 'accuracy', 'score2': 'accuracy'})
+    b = GridSearchCV(RandomForestClassifier(), param_grid, refit='score1',
+                     scoring={'score1': 'accuracy', 'score2': 'accuracy'})
+    a.fit(X, y)
+    b.fit(X, y)
+
+    assert a.best_score_ > 0
+    assert isinstance(a.best_index_, type(b.best_index_))
+    assert isinstance(a.best_params_, type(b.best_params_))
+
+
+@pytest.mark.skipif(not _HAS_MULTIPLE_METRICS, reason="Added in 0.19.0")
+def test_cv_multiplemetrics_requires_refit_metric():
+    X, y = make_classification(random_state=0)
+
+    param_grid = {'max_depth': [1, 5]}
+    a = dcv.GridSearchCV(RandomForestClassifier(), param_grid, refit=True,
+                         scoring={'score1': 'accuracy', 'score2': 'accuracy'})
+
+    with pytest.raises(ValueError):
+        a.fit(X, y)
+
+
+@pytest.mark.skipif(not _HAS_MULTIPLE_METRICS, reason="Added in 0.19.0")
+def test_cv_multiplemetrics_no_refit():
+    X, y = make_classification(random_state=0)
+
+    param_grid = {'max_depth': [1, 5]}
+    a = dcv.GridSearchCV(RandomForestClassifier(), param_grid, refit=False,
+                         scoring={'score1': 'accuracy', 'score2': 'accuracy'})
+    b = GridSearchCV(RandomForestClassifier(), param_grid, refit=False,
+                     scoring={'score1': 'accuracy', 'score2': 'accuracy'})
+    assert hasattr(a, 'best_index_') is hasattr(b, 'best_index_')
+    assert hasattr(a, 'best_estimator_') is hasattr(b, 'best_estimator_')
+    assert hasattr(a, 'best_score_') is hasattr(b, 'best_score_')
+

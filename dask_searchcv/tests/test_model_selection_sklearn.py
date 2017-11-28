@@ -19,7 +19,8 @@ from sklearn.datasets import (make_classification, make_blobs,
                               make_multilabel_classification)
 from sklearn.exceptions import NotFittedError, FitFailedWarning
 from sklearn.linear_model import Ridge
-from sklearn.metrics import f1_score, make_scorer, roc_auc_score
+from sklearn.metrics import (f1_score, make_scorer, roc_auc_score,
+                             accuracy_score)
 from sklearn.model_selection import (KFold, StratifiedKFold,
                                      StratifiedShuffleSplit, LeaveOneGroupOut,
                                      LeavePGroupsOut, GroupKFold,
@@ -34,6 +35,7 @@ import dask_searchcv as dcv
 from dask_searchcv.utils_test import (FailingClassifier, MockClassifier,
                                       CheckingClassifier, MockDataFrame,
                                       ignore_warnings)
+from dask_searchcv._compat import _HAS_MULTIPLE_METRICS, _SK_VERSION
 
 
 class LinearSVCNoScore(LinearSVC):
@@ -45,6 +47,9 @@ class LinearSVCNoScore(LinearSVC):
 
 X = np.array([[-1, -1], [-2, -1], [1, 1], [2, 1]])
 y = np.array([1, 1, 2, 2])
+
+da_X = da.from_array(np.random.normal(size=(20, 3)), chunks=(3, 3))
+da_y = da.from_array(np.random.randint(2, size=20), chunks=3)
 
 
 def assert_grid_iter_equals_getitem(grid):
@@ -187,6 +192,40 @@ def test_grid_search_groups():
         gs.fit(X, y)
 
 
+@pytest.mark.skipif(_SK_VERSION < '0.19.1',
+                    reason='only deprecated for >= 0.19.1')
+def test_return_train_score_warn():
+    # Test that warnings are raised. Will be removed in sklearn 0.21
+    X = np.arange(100).reshape(10, 10)
+    y = np.array([0] * 5 + [1] * 5)
+    grid = {'C': [1, 2]}
+
+    for val in [True, False]:
+        est = dcv.GridSearchCV(LinearSVC(random_state=0), grid,
+                               return_train_score=val)
+        with pytest.warns(None) as warns:
+            results = est.fit(X, y).cv_results_
+        assert not warns
+        assert type(results) is dict
+
+    est = dcv.GridSearchCV(LinearSVC(random_state=0), grid)
+    with pytest.warns(None) as warns:
+        results = est.fit(X, y).cv_results_
+    assert not warns
+
+    train_keys = {'split0_train_score', 'split1_train_score',
+                  'split2_train_score', 'mean_train_score', 'std_train_score'}
+
+    for key in results:
+        if key in train_keys:
+            with pytest.warns(FutureWarning):
+                results[key]
+        else:
+            with pytest.warns(None) as warns:
+                results[key]
+            assert not warns
+
+
 def test_classes__property():
     # Test that classes_ property matches best_estimator_.classes_
     X = np.arange(100).reshape(10, 10)
@@ -232,15 +271,36 @@ def test_no_refit():
     clf = MockClassifier()
     grid_search = dcv.GridSearchCV(clf, {'foo_param': [1, 2, 3]}, refit=False)
     grid_search.fit(X, y)
-    assert (not hasattr(grid_search, "best_estimator_") and
-                hasattr(grid_search, "best_index_") and
-                hasattr(grid_search, "best_params_"))
+    assert not hasattr(grid_search, "best_estimator_")
+    assert not hasattr(grid_search, "best_index_")
+    assert not hasattr(grid_search, "best_score_")
+    assert not hasattr(grid_search, "best_params_")
 
     # Make sure the predict/transform etc fns raise meaningfull error msg
     for fn_name in ('predict', 'predict_proba', 'predict_log_proba',
                     'transform', 'inverse_transform'):
         with pytest.raises(NotFittedError) as exc:
             getattr(grid_search, fn_name)(X)
+        assert (('refit=False. %s is available only after refitting on the '
+                 'best parameters' % fn_name) in str(exc.value))
+
+
+@pytest.mark.skipif(not _HAS_MULTIPLE_METRICS, reason="Added in 0.19.0")
+def test_no_refit_multiple_metrics():
+    clf = DecisionTreeClassifier()
+    scoring = {'score_1': 'accuracy', 'score_2': 'accuracy'}
+
+    gs = dcv.GridSearchCV(clf, {'max_depth': [1, 2, 3]}, refit=False,
+                          scoring=scoring)
+    gs.fit(da_X, da_y)
+    assert not hasattr(gs, "best_estimator_")
+    assert not hasattr(gs, "best_index_")
+    assert not hasattr(gs, "best_score_")
+    assert not hasattr(gs, "best_params_")
+
+    for fn_name in ('predict', 'predict_proba', 'predict_log_proba'):
+        with pytest.raises(NotFittedError) as exc:
+            getattr(gs, fn_name)(X)
         assert (('refit=False. %s is available only after refitting on the '
                  'best parameters' % fn_name) in str(exc.value))
 
@@ -543,10 +603,10 @@ def test_grid_search_cv_results():
     params = [dict(kernel=['rbf', ], C=[1, 10], gamma=[0.1, 1]),
               dict(kernel=['poly', ], degree=[1, 2])]
     grid_search = dcv.GridSearchCV(SVC(), cv=n_splits, iid=False,
-                                   param_grid=params)
+                                   param_grid=params, return_train_score=True)
     grid_search.fit(X, y)
     grid_search_iid = dcv.GridSearchCV(SVC(), cv=n_splits, iid=True,
-                                       param_grid=params)
+                                       param_grid=params, return_train_score=True)
     grid_search_iid.fit(X, y)
 
     param_keys = ('param_C', 'param_degree', 'param_gamma', 'param_kernel')
@@ -579,13 +639,13 @@ def test_grid_search_cv_results():
         assert all((cv_results['param_C'].mask[i] and
                     cv_results['param_gamma'].mask[i] and
                     not cv_results['param_degree'].mask[i])
-                    for i in range(n_candidates)
-                    if cv_results['param_kernel'][i] == 'linear')
+                   for i in range(n_candidates)
+                   if cv_results['param_kernel'][i] == 'linear')
         assert all((not cv_results['param_C'].mask[i] and
                     not cv_results['param_gamma'].mask[i] and
                     cv_results['param_degree'].mask[i])
-                    for i in range(n_candidates)
-                    if cv_results['param_kernel'][i] == 'rbf')
+                   for i in range(n_candidates)
+                   if cv_results['param_kernel'][i] == 'rbf')
 
 
 def test_random_search_cv_results():
@@ -602,11 +662,13 @@ def test_random_search_cv_results():
     params = dict(C=expon(scale=10), gamma=expon(scale=0.1))
     random_search = dcv.RandomizedSearchCV(SVC(), n_iter=n_search_iter,
                                            cv=n_splits, iid=False,
-                                           param_distributions=params)
+                                           param_distributions=params,
+                                           return_train_score=True)
     random_search.fit(X, y)
     random_search_iid = dcv.RandomizedSearchCV(SVC(), n_iter=n_search_iter,
                                                cv=n_splits, iid=True,
-                                               param_distributions=params)
+                                               param_distributions=params,
+                                               return_train_score=True)
     random_search_iid.fit(X, y)
 
     param_keys = ('param_C', 'param_gamma')
@@ -647,9 +709,11 @@ def test_search_iid_param():
     # create "cv" for splits
     cv = [[mask, ~mask], [~mask, mask]]
     # once with iid=True (default)
-    grid_search = dcv.GridSearchCV(SVC(), param_grid={'C': [1, 10]}, cv=cv)
+    grid_search = dcv.GridSearchCV(SVC(), param_grid={'C': [1, 10]}, cv=cv,
+                                   return_train_score=True)
     random_search = dcv.RandomizedSearchCV(SVC(), n_iter=2,
                                            param_distributions={'C': [1, 10]},
+                                           return_train_score=True,
                                            cv=cv)
     for search in (grid_search, random_search):
         search.fit(X, y)
@@ -691,10 +755,10 @@ def test_search_iid_param():
 
     # once with iid=False
     grid_search = dcv.GridSearchCV(SVC(), param_grid={'C': [1, 10]},
-                                   cv=cv, iid=False)
+                                   cv=cv, iid=False, return_train_score=True)
     random_search = dcv.RandomizedSearchCV(SVC(), n_iter=2,
                                            param_distributions={'C': [1, 10]},
-                                           cv=cv, iid=False)
+                                           cv=cv, iid=False, return_train_score=True)
 
     for search in (grid_search, random_search):
         search.fit(X, y)
@@ -732,9 +796,11 @@ def test_search_cv_results_rank_tie_breaking():
     # which would result in a tie of their mean cv-scores
     param_grid = {'C': [1, 1.001, 0.001]}
 
-    grid_search = dcv.GridSearchCV(SVC(), param_grid=param_grid)
+    grid_search = dcv.GridSearchCV(SVC(), param_grid=param_grid,
+                                   return_train_score=True)
     random_search = dcv.RandomizedSearchCV(SVC(), n_iter=3,
-                                           param_distributions=param_grid)
+                                           param_distributions=param_grid,
+                                           return_train_score=True)
 
     for search in (grid_search, random_search):
         search.fit(X, y)
@@ -954,3 +1020,34 @@ def test_search_train_scores_set_to_false():
     gs = dcv.GridSearchCV(clf, param_grid={'C': [0.1, 0.2]},
                           return_train_score=False)
     gs.fit(X, y)
+    for key in gs.cv_results_:
+        assert not key.endswith('train_score')
+
+
+@pytest.mark.skipif(not _HAS_MULTIPLE_METRICS, reason="Added in 0.19.0")
+def test_multiple_metrics():
+    scoring = {'AUC': 'roc_auc', 'Accuracy': make_scorer(accuracy_score)}
+
+    # Setting refit='AUC', refits an estimator on the whole dataset with the
+    # parameter setting that has the best cross-validated AUC score.
+    # That estimator is made available at ``gs.best_estimator_`` along with
+    # parameters like ``gs.best_score_``, ``gs.best_parameters_`` and
+    # ``gs.best_index_``
+    gs = dcv.GridSearchCV(DecisionTreeClassifier(random_state=42),
+                          param_grid={'min_samples_split': range(2, 403, 10)},
+                          scoring=scoring, cv=5, refit='AUC')
+    gs.fit(da_X, da_y)
+    # some basic checks
+    assert set(gs.scorer_) == {'AUC', 'Accuracy'}
+    cv_results = gs.cv_results_.keys()
+    assert 'split0_test_AUC' in cv_results
+    assert 'split0_train_AUC' in cv_results
+
+    assert 'split0_test_Accuracy' in cv_results
+    assert 'split0_test_Accuracy' in cv_results
+
+    assert 'mean_train_AUC' in cv_results
+    assert 'mean_train_Accuracy' in cv_results
+
+    assert 'std_train_AUC' in cv_results
+    assert 'std_train_Accuracy' in cv_results
