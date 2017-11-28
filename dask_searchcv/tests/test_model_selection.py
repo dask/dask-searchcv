@@ -641,7 +641,7 @@ class CacheCVLike(CVCache):
                                    random_state=0)
 
 
-class CacheCVBad(CacheCVLike):
+class BadCacheCV(CVCache):
 
     extract = CVCache.extract
 
@@ -653,15 +653,14 @@ def cv_split_X_y_ok(cv, X, y, groups, is_pairwise, cache):
         # normally one would use elements of X to inform how
         # a sample should be drawn, e.g. filenames (see example_arguments above)
         assert hasattr(xi, 'startswith') and xi.startswith('argument_')
-    CacheCVLike.called = 0
     return CacheCVLike(list(cv.split(X, y, groups)), is_pairwise, cache)
 
 def cv_split_X_ok(cv, X, y, groups, is_pairwise, cache):
-    return cv_split_X_y_ok(cv, X, y, groups, is_pairwise, cache)
+    return CacheCVLike(list(cv.split(X, y, groups)), is_pairwise, cache)
 
 
 def cv_split_bad(cv, X, y, groups, is_pairwise, cache):
-    return CacheCVBad(list(cv.split(X, y, groups)), is_pairwise, cache)
+    return BadCacheCV(list(cv.split(X, y, groups)), is_pairwise, cache)
 
 
 @pytest.mark.parametrize('cv_split, refit, should_pass', [
@@ -681,6 +680,7 @@ def test_cv_cache_instance_to_search(cv_split, refit, should_pass):
     n_splits = 3
     cv = KFold(n_splits)
     pg = {'foo_param': list(range(2, 100))}
+    CacheCVLike.called = 0
     if not isinstance(refit, bool):
         Xy = make_classification(n_samples=100,
                                  n_features=5,
@@ -696,8 +696,8 @@ def test_cv_cache_instance_to_search(cv_split, refit, should_pass):
     class GridSearchCVSampler(dcv.GridSearchCV):
 
         @classmethod
-        def _cv_split(self, *a, **kw):
-            return cv_split(*a, **kw)
+        def _get_cv_split(self, *a, **kw):
+            return cv_split
 
     def fit_pred():
         gs = GridSearchCVSampler(estimator,

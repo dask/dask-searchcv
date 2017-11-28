@@ -75,7 +75,7 @@ def build_graph(estimator, cv, scorer, candidate_params, X, y=None,
     dsk = {}
     X_name, y_name, groups_name = to_keys(dsk, X, y, groups)
     n_splits = compute_n_splits(cv, X, y, groups)
-    if cv_split:
+    if cv_split or _is_arraylike(refit):
         if not _is_arraylike(refit) and refit:
             raise ValueError('Expected refit=X or refit=(X, y) with cv_split')
     else:
@@ -788,7 +788,9 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
             raise ValueError("error_score must be the string 'raise' or a"
                              " numeric value.")
 
-        cv_split = getattr(self, '_cv_split', None)
+        cv_split = getattr(self, '_get_cv_split', None)
+        if cv_split:
+            cv_split = cv_split()
         dsk, keys, n_splits = build_graph(estimator, self.cv, self.scorer_,
                                           list(self._get_param_iterator()),
                                           X, y, groups, fit_params,
@@ -809,7 +811,7 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.cv_results_ = results = out[0]
         self.best_index_ = np.flatnonzero(results["rank_test_score"] == 1)[0]
 
-        if (hasattr(self, '_cv_split') and _is_arraylike(self.refit)) or self.refit:
+        if (cv_split and _is_arraylike(self.refit)) or self.refit:
             self.best_estimator_ = out[1]
         return self
 
