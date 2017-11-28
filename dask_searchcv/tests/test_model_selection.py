@@ -680,12 +680,14 @@ class BadCacheCV(CVCache):
 
 example_arguments = ['argument_{}'.format(_) for _ in range(15)]
 
+
 def cv_split_X_y_ok(cv, X, y, groups, is_pairwise, cache):
     for xi in X:
         # normally one would use elements of X to inform how
         # a sample should be drawn, e.g. filenames (see example_arguments above)
         assert hasattr(xi, 'startswith') and xi.startswith('argument_')
     return CacheCVLike(list(cv.split(X, y, groups)), is_pairwise, cache)
+
 
 def cv_split_X_ok(cv, X, y, groups, is_pairwise, cache):
     return CacheCVLike(list(cv.split(X, y, groups)), is_pairwise, cache)

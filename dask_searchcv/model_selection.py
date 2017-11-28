@@ -895,7 +895,6 @@ class DaskBaseSearchCV(BaseEstimator, MetaEstimatorMixin):
 
         return self
 
-
     def visualize(self, filename='mydask', format=None, **kwargs):
         """Render the task graph for this parameter search using ``graphviz``.
 

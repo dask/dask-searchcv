@@ -178,9 +178,9 @@ class CheckingClassifier(BaseEstimator, ClassifierMixin):
             score = 0.
         return score
 
+
 class MockUnsupervised(MockClassifier):
 
     def fit(self, X, y=None, **kw):
         assert getattr(X, 'ndim', None) == 2 and X.shape[0]
         return self
-
