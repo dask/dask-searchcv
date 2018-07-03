@@ -1,6 +1,12 @@
 dask-searchcv
 =============
 
+Dask-SearchCV is now included in `Dask-ML <http://dask-ml.readthedocs.io/>_`.
+
+Further development to Dask-SearchCV is occuring in the
+`Dask-ML <https://github.com/dask/dask-ml>_` repository. Please post issues
+and make pull requests there.
+
 |Travis Status| |Doc Status| |Conda Badge| |PyPI Badge|
 
 Tools for performing hyperparameter search with
